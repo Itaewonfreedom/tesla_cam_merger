@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QListWidget, QLabel, QComboBox, QProgressBar,
                              QMessageBox, QTextEdit, QCheckBox, QGroupBox,
                              QSplitter, QSlider, QStyle)
-from PyQt6.QtCore import QProcess, QUrl, Qt
+from PyQt6.QtCore import QProcess, QUrl, Qt, QEvent
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
@@ -33,6 +33,27 @@ ANGLE_ORDER = ["front", "back", "left_repeater", "right_repeater",
 def _fmt_time(ms):
     s = max(0, ms) // 1000
     return f"{s // 60:02}:{s % 60:02}"
+
+
+class AspectRatioWidget(QWidget):
+    """단일 자식 위젯을 지정 비율(기본 16:9)로 중앙에 레터박스 배치한다."""
+
+    def __init__(self, inner, ratio=16 / 9):
+        super().__init__()
+        self._ratio = ratio
+        self._inner = inner
+        inner.setParent(self)
+        self.setStyleSheet("background:#000;")
+
+    def resizeEvent(self, _e):
+        w, h = self.width(), self.height()
+        if h <= 0:
+            return
+        if w / h > self._ratio:          # 너무 넓음 → 폭을 비율에 맞춤
+            iw, ih = int(h * self._ratio), h
+        else:                            # 너무 높음 → 높이를 비율에 맞춤
+            iw, ih = w, int(w / self._ratio)
+        self._inner.setGeometry((w - iw) // 2, (h - ih) // 2, iw, ih)
 
 
 class MainWindow(QMainWindow):
@@ -64,6 +85,7 @@ class MainWindow(QMainWindow):
         self._user_seeking = False
         self._pending_pos = 0
         self._want_play = False
+        self._was_playing = False
 
         self.settings_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -71,6 +93,22 @@ class MainWindow(QMainWindow):
         self.last_output_dir = self.settings.get("last_output_dir", os.getcwd())
 
         self.init_ui()
+
+        # 전역 단축키: Esc=종료, Space=재생/일시정지 (포커스 위치와 무관하게 동작)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_Escape:
+                self.close()
+                return True
+            if key == Qt.Key.Key_Space and not event.isAutoRepeat():
+                self.toggle_play()
+                return True
+        return super().eventFilter(obj, event)
 
     # ----------------------------- 설정 ----------------------------- #
     def load_settings(self):
@@ -150,9 +188,12 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Preview — original clip")
         v = QVBoxLayout(box)
 
+        # 16:9 레터박스 컨테이너 안에 비디오 위젯 배치
         self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(420, 280)
-        v.addWidget(self.video_widget, stretch=1)
+        self.video_widget.setStyleSheet("background:#000;")
+        self.video_frame = AspectRatioWidget(self.video_widget, 16 / 9)
+        self.video_frame.setMinimumSize(480, 270)
+        v.addWidget(self.video_frame, stretch=1)
 
         # 앵글 선택
         angle_row = QHBoxLayout()
@@ -165,13 +206,15 @@ class MainWindow(QMainWindow):
         # 트랜스포트
         trans = QHBoxLayout()
         self.btn_play = QPushButton()
+        self.btn_play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_play.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
         self.btn_play.clicked.connect(self.toggle_play)
         trans.addWidget(self.btn_play)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
-        self.slider.sliderPressed.connect(lambda: setattr(self, "_user_seeking", True))
-        self.slider.sliderReleased.connect(self._slider_released)
+        self.slider.sliderPressed.connect(self.on_slider_pressed)
+        self.slider.sliderMoved.connect(self.on_slider_moved)
+        self.slider.sliderReleased.connect(self.on_slider_released)
         trans.addWidget(self.slider, stretch=1)
         self.lbl_time = QLabel("00:00 / 00:00")
         trans.addWidget(self.lbl_time)
@@ -357,9 +400,26 @@ class MainWindow(QMainWindow):
             self.slider.setValue(pos)
         self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
 
-    def _slider_released(self):
+    def on_slider_pressed(self):
+        # 드래그 시작: 재생 중이었는지 기억하고, 매끄러운 탐색을 위해 잠시 일시정지
+        self._user_seeking = True
+        self._was_playing = (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        if self._was_playing:
+            self.player.pause()
+
+    def on_slider_moved(self, pos):
+        # 드래그하는 동안 해당 프레임을 실시간으로 미리보기
+        self.player.setPosition(pos)
+        self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
+
+    def on_slider_released(self):
         self._user_seeking = False
         self.player.setPosition(self.slider.value())
+        # 재생 중에 긁었으면 놓은 뒤 자동으로 이어서 재생
+        if getattr(self, "_was_playing", False):
+            self.player.play()
+        self._was_playing = False
 
     # --------------------------- 설정 수집 --------------------------- #
     def build_config(self):
