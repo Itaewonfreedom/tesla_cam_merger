@@ -325,6 +325,11 @@ class MainWindow(QMainWindow):
         self.process_next()
 
     def finish_processing(self):
+        # 자막 PNG 임시 폴더 정리
+        try:
+            self.processor.cleanup_temp()
+        except Exception as e:
+            self.log(f"Failed to cleanup timestamp frames: {e}")
         self.lbl_status.setText("Processing Complete!")
         self.btn_process.setEnabled(True)
         self.btn_select_dir.setEnabled(True)

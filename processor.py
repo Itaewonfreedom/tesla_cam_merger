@@ -1,11 +1,18 @@
 import os
 import re
+import shutil
 import datetime
 from pathlib import Path
+
+# 타임스탬프 자막에 사용할 폰트 (Pillow가 직접 렌더링)
+FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
+FONT_SIZE = 48
 
 class TeslaDashcamProcessor:
     def __init__(self):
         self.events = {}
+        # 자막 PNG 시퀀스를 만든 임시 폴더 목록. 처리 후 cleanup_temp()으로 정리.
+        self.temp_frame_dirs = []
 
     def find_events(self, directory):
         """
@@ -88,6 +95,51 @@ class TeslaDashcamProcessor:
             print(f"Error probing {filepath}: {e}")
             return 1280, 960, 60.0 # Fallback
 
+    def _render_timestamp_frames(self, start_epoch, duration, bar_width, output_file):
+        """
+        매 초 갱신되는 타임스탬프 자막을 PNG 시퀀스로 렌더링한다.
+        ffmpeg의 drawtext(freetype 의존)를 쓸 수 없는 환경을 위해 Pillow로 직접 그린다.
+        Pillow는 freetype를 자체 번들하므로 시스템 ffmpeg 빌드와 무관하게 동작한다.
+
+        반환: (프레임 폴더 경로, 자막 바 높이). 이 폴더는 -framerate 1 입력으로 쓰인다.
+        """
+        from PIL import Image, ImageDraw, ImageFont
+
+        font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+        bar_h = FONT_SIZE + 20  # 위아래 여백 10px
+
+        # 출력 파일 옆 숨김 임시 폴더에 프레임 생성
+        frame_dir = os.path.join(
+            os.path.dirname(os.path.abspath(output_file)),
+            "." + os.path.splitext(os.path.basename(output_file))[0] + "_ts",
+        )
+        if os.path.exists(frame_dir):
+            shutil.rmtree(frame_dir)
+        os.makedirs(frame_dir, exist_ok=True)
+        self.temp_frame_dirs.append(frame_dir)
+
+        # overlay eof 대비 약간 여유를 두고 생성 (duration 올림 + 2초)
+        total_seconds = int(duration) + 2
+        for i in range(total_seconds):
+            ts = datetime.datetime.fromtimestamp(start_epoch + i, tz=datetime.timezone.utc)
+            text = ts.strftime("%Y-%m-%d %H:%M:%S")
+
+            img = Image.new("RGBA", (bar_width, bar_h), (0, 0, 0, 128))
+            draw = ImageDraw.Draw(img)
+            tb = draw.textbbox((0, 0), text, font=font)
+            tw = tb[2] - tb[0]
+            draw.text(((bar_width - tw) / 2, 6), text, font=font, fill=(255, 255, 255, 255))
+            img.save(os.path.join(frame_dir, f"f_{i:05d}.png"))
+
+        return frame_dir, bar_h
+
+    def cleanup_temp(self):
+        """생성된 자막 PNG 임시 폴더들을 정리한다 (best-effort)."""
+        for d in self.temp_frame_dirs:
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+        self.temp_frame_dirs = []
+
     def generate_ffmpeg_command(self, timestamp, output_file, encoding="libx264", bitrate="10M"):
         """
         Generates the FFmpeg command to merge the videos.
@@ -133,16 +185,26 @@ class TeslaDashcamProcessor:
         # -pix_fmt yuv420p ensures compatibility with all players (QuickTime, etc).
         common_params = ["-r", "30", "-fps_mode", "cfr", "-pix_fmt", "yuv420p"]
 
+        # 합성 결과 캔버스 폭: front 폭(위쪽) vs 하단 3분할 폭(target_w*3) 중 더 큰 값.
+        # target_w = front_w/3을 짝수로 내림했으므로 보통 front_w와 같거나 1~2px 작다.
+        canvas_w = max(front_w, target_w * 3)
+
+        # 매 초 갱신되는 타임스탬프 자막을 Pillow로 PNG 시퀀스 렌더링 (drawtext 대체)
+        frame_dir, bar_h = self._render_timestamp_frames(
+            start_epoch, duration, canvas_w, output_file
+        )
+        ts_input = os.path.join(frame_dir, "f_%05d.png")
+
         # Filter Complex
-        # Scale bottom 3 videos to target_w
-        
+        # - 하단 3개 영상을 target_w로 스케일
+        # - xstack으로 2행 배치 (위: front / 아래: left|back|right)
+        # - 자막 PNG 시퀀스(입력 4번)를 하단 중앙에 overlay
         filter_complex = (
             f"[1:v]scale=w={target_w}:h=-1[left];"
             f"[2:v]scale=w={target_w}:h=-1[back];"
             f"[3:v]scale=w={target_w}:h=-1[right];"
             f"[0:v][left][back][right]xstack=inputs=4:layout=0_0|0_{front_h}|w1_{front_h}|w1+w2_{front_h}[stacked];"
-            f"[stacked]drawtext=fontfile=/System/Library/Fonts/Helvetica.ttc:text='%{{pts\\:gmtime\\:{start_epoch}}}':"
-            f"fontsize=48:fontcolor=white:box=1:boxcolor=black@0.5:x=(w-text_w)/2:y={front_h}-text_h-10[outv]"
+            f"[stacked][4:v]overlay=x=(W-w)/2:y=H-h-10[outv]"
         )
 
         cmd = [
@@ -151,9 +213,10 @@ class TeslaDashcamProcessor:
             "-i", input_left,
             "-i", input_back,
             "-i", input_right,
+            "-framerate", "1", "-i", ts_input,
             "-filter_complex", filter_complex,
             "-map", "[outv]",
-            "-map", "0:a?", 
+            "-map", "0:a?",
         ] + enc_params + common_params + [output_file]
 
         return cmd

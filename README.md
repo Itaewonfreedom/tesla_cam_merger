@@ -67,28 +67,25 @@ python3 -m venv .venv
 합성 시:
 - **전방(front)** 카메라를 위쪽 전체에 크게 배치
 - **좌측 리피터 / 후방 / 우측 리피터**를 아래쪽에 1/3 크기로 가로 배치 (`xstack`)
-- 화면 하단 중앙에 **촬영 시각 타임스탬프**를 자막으로 표시 (`drawtext` + `gmtime`)
+- 화면 하단 중앙에 **촬영 시각 타임스탬프**를 매초 갱신되며 표시 (아래 "타임스탬프 처리" 참고)
 - 파일명 시각을 클립의 **종료 시각**으로 보고, 영상 길이만큼 빼서 시작 시각을 계산
 - 재생 호환성을 위해 **30fps CFR**, `yuv420p`로 정규화
 
 > 참고: `processor.py`는 필수 카메라를 `front / left_repeater / back / right_repeater` 4종으로 가정합니다. 샘플 폴더에는 `left_pillar / right_pillar`(B필러 카메라, 최신 모델) 영상도 함께 들어있지만 현재 합성에는 사용하지 않습니다.
 
----
+### 타임스탬프 처리 (freetype 비의존)
 
-## 트러블슈팅
+영상에 시각 자막을 새기는 방식으로 FFmpeg의 `drawtext` 필터를 쓰는 게 일반적이지만, **Homebrew core의 FFmpeg는 라이선스 정책상 `libfreetype` 없이 빌드**되어 `drawtext`·`subtitles`·`libass` 텍스트 필터가 전부 빠져 있습니다. 확인:
+```bash
+ffmpeg -filters | grep -E 'drawtext|subtitles'   # 비어 있으면 텍스트 필터 없음
+```
 
-### `No such filter: 'drawtext'` 오류로 합성 실패
-하단 타임스탬프 자막은 FFmpeg의 `drawtext` 필터를 쓰는데, 이 필터는 FFmpeg가 **libfreetype을 포함해 빌드**되어 있어야 동작합니다. Homebrew 빌드에 따라 빠져 있을 수 있습니다. 확인:
-```bash
-ffmpeg -filters | grep drawtext   # 아무것도 안 나오면 빠진 것
-```
-해결: freetype 포함 빌드로 재설치
-```bash
-brew reinstall ffmpeg            # 보통 freetype 포함됨
-# 또는
-brew install homebrew-ffmpeg/ffmpeg/ffmpeg
-```
-(빌드를 못 바꾸는 경우, `processor.py`의 `filter_complex`에서 `drawtext` 부분을 빼면 자막 없이 합성은 됩니다.)
+그래서 이 앱은 시스템 FFmpeg 빌드에 의존하지 않는 방식을 씁니다:
+
+1. **Pillow**로 매 초의 타임스탬프 텍스트를 PNG 한 장씩 렌더링 (Pillow는 freetype를 자체 번들 → 시스템과 무관하게 동작)
+2. 이 PNG들을 `-framerate 1` 입력 시퀀스로 넣고, FFmpeg의 기본 필터인 **`overlay`** 로 합성 화면 하단 중앙에 얹음
+
+덕분에 별도 FFmpeg 재빌드 없이 어떤 환경에서도 동작합니다. PNG는 출력 파일 옆 숨김 임시 폴더(`.<이름>_ts/`)에 생성되며, 처리 완료 후 `cleanup_temp()`으로 자동 삭제됩니다.
 
 ## 개발 메모
 - 영상 처리 로직(`processor.py`)과 UI(`gui.py`)가 분리되어 있어, 로직은 `verify_cli.py`로 GUI 없이 단독 테스트 가능합니다.
