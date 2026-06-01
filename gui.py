@@ -1,15 +1,17 @@
 """
 Tesla Dashcam Merger — PyQt6 GUI.
 
-폴더를 선택해 이벤트를 목록으로 보고, 선택한 이벤트의 원본 클립을 앵글별로 미리 재생할 수
-있다(기본 FRONT). 레이아웃/인코딩/해상도/배속 등 옵션을 골라 개별 변환하거나 하나로 머지한다.
-영상 처리 명령은 processor.py가 생성하고, 실행은 QProcess로 비동기 수행한다.
+다크 테마 기반 UI. 좌측 이벤트 목록, 중앙의 큼직한 16:9 미리보기 플레이어가 중심이고,
+인코딩/해상도/배속 등 세부 export 옵션은 별도 설정 창(⚙ Export Settings)으로 분리했다.
+메인에서는 "어떤 레이아웃으로 내보낼지"만 고르면 된다. 영상 처리 명령은 processor.py가
+생성하고 실행은 QProcess로 비동기 수행한다.
 """
 
 import os
 import re
 import sys
 import json
+import random
 import shutil
 import tempfile
 
@@ -17,17 +19,100 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QGridLayout, QPushButton, QFileDialog,
                              QListWidget, QLabel, QComboBox, QProgressBar,
                              QMessageBox, QTextEdit, QCheckBox, QGroupBox,
-                             QSplitter, QSlider, QStyle)
-from PyQt6.QtCore import QProcess, QUrl, Qt, QEvent
+                             QSplitter, QSlider, QStyle, QDialog, QDialogButtonBox,
+                             QFormLayout, QSizePolicy)
+from PyQt6.QtCore import QProcess, QUrl, Qt, QEvent, QTimer
+from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
 from processor import (TeslaDashcamProcessor, MergeConfig, CAMERA_LABELS,
                        LAYOUTS, RESOLUTION_PRESETS)
 
-# 미리보기 앵글 선택 순서 (가진 카메라만 노출)
+# 미리보기 앵글 순서 (가진 카메라만 노출)
 ANGLE_ORDER = ["front", "back", "left_repeater", "right_repeater",
                "left_pillar", "right_pillar"]
+
+LAYOUT_LABELS = {
+    "classic": "Classic — Front + 3",
+    "grid6": "6-Camera Grid",
+    "front": "Front Only",
+}
+
+DEFAULT_OPTS = dict(encoding="hevc_videotoolbox", quality="bitrate", bitrate="20M",
+                    crf=20, fps=30, width=1920, speed=1.0, timestamp=True, labels=True)
+
+ELON_QUOTES = [
+    "“When something is important enough, you do it even if the odds are not in your favor.”",
+    "“The first step is to establish that something is possible; then probability will occur.”",
+    "“I would like to die on Mars. Just not on impact.”",
+    "“Some people don't like change, but you need to embrace change if the alternative is disaster.”",
+    "“Persistence is very important. You should not give up unless you are forced to give up.”",
+    "“If you get up in the morning and think the future is going to be better, it is a bright day.”",
+]
+
+# ----------------------------- 다크 테마 ----------------------------- #
+DARK_QSS = """
+QWidget { background:#15171c; color:#e6e8ec; font-size:13px; }
+QMainWindow, QDialog { background:#15171c; }
+#Header { background:#0e0f13; border-bottom:1px solid #2a2d36; }
+#Title { font-size:18px; font-weight:700; color:#ffffff; }
+#Tagline { color:#7b8190; font-size:11px; }
+#Rocket { font-size:18px; border:none; background:transparent; padding:4px 8px; }
+#Rocket:hover { background:#23262f; border-radius:8px; }
+QGroupBox { border:1px solid #2a2d36; border-radius:10px; margin-top:14px; padding:10px;
+            background:#1a1d24; }
+QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; color:#9aa0ad; }
+QListWidget { background:#0f1115; border:1px solid #2a2d36; border-radius:10px; padding:4px; }
+QListWidget::item { padding:7px 8px; border-radius:6px; }
+QListWidget::item:selected { background:#2b6cff; color:#fff; }
+QListWidget::item:hover:!selected { background:#20242d; }
+QPushButton { background:#23262f; border:1px solid #313542; border-radius:8px;
+              padding:7px 14px; color:#e6e8ec; }
+QPushButton:hover { background:#2c3140; border-color:#3b4150; }
+QPushButton:pressed { background:#1c1f27; }
+QPushButton:disabled { color:#5b606c; background:#191b21; }
+#Primary { background:#2b6cff; border:none; color:#fff; font-weight:600; padding:9px 18px; }
+#Primary:hover { background:#3f7bff; }
+#Primary:disabled { background:#28324a; color:#8a92a6; }
+QComboBox { background:#0f1115; border:1px solid #313542; border-radius:8px; padding:5px 8px; }
+QComboBox:hover { border-color:#3b4150; }
+QComboBox QAbstractItemView { background:#1a1d24; selection-background-color:#2b6cff;
+                              border:1px solid #313542; outline:none; }
+QCheckBox { spacing:8px; }
+QCheckBox::indicator { width:16px; height:16px; border-radius:4px; border:1px solid #3b4150;
+                       background:#0f1115; }
+QCheckBox::indicator:checked { background:#2b6cff; border-color:#2b6cff; }
+QProgressBar { background:#0f1115; border:1px solid #2a2d36; border-radius:8px; height:14px;
+               text-align:center; color:#cfd3db; }
+QProgressBar::chunk { background:#2b6cff; border-radius:7px; }
+QTextEdit { background:#0f1115; border:1px solid #2a2d36; border-radius:10px; color:#9aa0ad;
+            font-family:Menlo,monospace; font-size:11px; }
+QSlider::groove:horizontal { height:6px; background:#2a2d36; border-radius:3px; }
+QSlider::sub-page:horizontal { background:#2b6cff; border-radius:3px; }
+QSlider::handle:horizontal { background:#fff; width:14px; height:14px; margin:-5px 0;
+                             border-radius:7px; }
+QLabel { color:#cfd3db; }
+QSplitter::handle { background:#2a2d36; width:2px; }
+"""
+
+
+def apply_dark_theme(app):
+    app.setStyle("Fusion")
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor("#15171c"))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor("#e6e8ec"))
+    pal.setColor(QPalette.ColorRole.Base, QColor("#0f1115"))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#1a1d24"))
+    pal.setColor(QPalette.ColorRole.Text, QColor("#e6e8ec"))
+    pal.setColor(QPalette.ColorRole.Button, QColor("#23262f"))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor("#e6e8ec"))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor("#2b6cff"))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1d24"))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#e6e8ec"))
+    app.setPalette(pal)
+    app.setStyleSheet(DARK_QSS)
 
 
 def _fmt_time(ms):
@@ -44,29 +129,120 @@ class AspectRatioWidget(QWidget):
         self._inner = inner
         inner.setParent(self)
         self.setStyleSheet("background:#000;")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def resizeEvent(self, _e):
         w, h = self.width(), self.height()
         if h <= 0:
             return
-        if w / h > self._ratio:          # 너무 넓음 → 폭을 비율에 맞춤
+        if w / h > self._ratio:
             iw, ih = int(h * self._ratio), h
-        else:                            # 너무 높음 → 높이를 비율에 맞춤
+        else:
             iw, ih = w, int(w / self._ratio)
         self._inner.setGeometry((w - iw) // 2, (h - ih) // 2, iw, ih)
 
 
+# ----------------------------- 설정 다이얼로그 ----------------------------- #
+class ExportSettingsDialog(QDialog):
+    """인코딩/해상도/배속/오버레이 등 export 세부 옵션 창."""
+
+    def __init__(self, opts, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Export Settings")
+        self.setMinimumWidth(380)
+        form = QFormLayout(self)
+
+        self.combo_encoding = QComboBox()
+        self.combo_encoding.addItem("hevc_videotoolbox (GPU)", "hevc_videotoolbox")
+        self.combo_encoding.addItem("libx264 (CPU)", "libx264")
+        self._select_data(self.combo_encoding, opts["encoding"])
+
+        self.combo_resolution = QComboBox()
+        self.combo_resolution.addItems(list(RESOLUTION_PRESETS))
+        for name, w in RESOLUTION_PRESETS.items():
+            if w == opts["width"]:
+                self.combo_resolution.setCurrentText(name)
+
+        self.combo_fps = QComboBox()
+        self.combo_fps.addItems(["24", "30", "60"])
+        self.combo_fps.setCurrentText(str(opts["fps"]))
+
+        self.combo_speed = QComboBox()
+        self.combo_speed.addItems(["1x", "2x", "4x", "8x", "16x"])
+        self.combo_speed.setCurrentText(f"{int(opts['speed'])}x")
+
+        self.combo_quality = QComboBox()
+        self.combo_quality.addItem("Bitrate", "bitrate")
+        self.combo_quality.addItem("Quality (CRF)", "crf")
+        self._select_data(self.combo_quality, opts["quality"])
+        self.combo_quality.currentIndexChanged.connect(self._sync_quality)
+
+        self.combo_bitrate = QComboBox()
+        self.combo_bitrate.addItems(["5M", "8M", "10M", "15M", "20M", "30M", "50M"])
+        self.combo_bitrate.setCurrentText(opts["bitrate"])
+
+        self.combo_crf = QComboBox()
+        self.combo_crf.addItems([str(x) for x in range(16, 33, 2)])
+        self.combo_crf.setCurrentText(str(opts["crf"]))
+
+        self.chk_timestamp = QCheckBox("Burn-in timestamp")
+        self.chk_timestamp.setChecked(opts["timestamp"])
+        self.chk_labels = QCheckBox("Camera labels")
+        self.chk_labels.setChecked(opts["labels"])
+
+        form.addRow("Encoding", self.combo_encoding)
+        form.addRow("Resolution", self.combo_resolution)
+        form.addRow("FPS", self.combo_fps)
+        form.addRow("Speed (timelapse)", self.combo_speed)
+        form.addRow("Quality mode", self.combo_quality)
+        form.addRow("Bitrate", self.combo_bitrate)
+        form.addRow("CRF", self.combo_crf)
+        form.addRow(self.chk_timestamp)
+        form.addRow(self.chk_labels)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self._sync_quality()
+
+    @staticmethod
+    def _select_data(combo, data):
+        idx = combo.findData(data)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _sync_quality(self):
+        crf = self.combo_quality.currentData() == "crf"
+        self.combo_crf.setEnabled(crf)
+        self.combo_bitrate.setEnabled(not crf)
+
+    def get_opts(self):
+        return dict(
+            encoding=self.combo_encoding.currentData(),
+            quality=self.combo_quality.currentData(),
+            bitrate=self.combo_bitrate.currentText(),
+            crf=int(self.combo_crf.currentText()),
+            fps=int(self.combo_fps.currentText()),
+            width=RESOLUTION_PRESETS[self.combo_resolution.currentText()],
+            speed=float(self.combo_speed.currentText().rstrip("x")),
+            timestamp=self.chk_timestamp.isChecked(),
+            labels=self.chk_labels.isChecked(),
+        )
+
+
+# ----------------------------- 메인 윈도우 ----------------------------- #
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Tesla Dashcam Merger")
-        self.resize(1080, 760)
+        self.resize(1120, 760)
 
         self.processor = TeslaDashcamProcessor()
         self.current_directory = ""
         self.events = {}
 
-        # 처리 큐 / 상태
         self.queue = []
         self.merge_mode = False
         self.temp_dir = None
@@ -75,30 +251,30 @@ class MainWindow(QMainWindow):
         self.current_process = None
         self.config = None
 
-        # 진행률(실제 길이 기반)
         self.total_output_secs = 0.0
         self.done_output_secs = 0.0
         self.current_event_secs = 0.0
 
-        # 미리보기 상태
         self.preview_event = None
         self._user_seeking = False
         self._pending_pos = 0
         self._want_play = False
         self._was_playing = False
+        self._egg_buf = ""
 
         self.settings_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "settings.json")
         self.settings = self.load_settings()
         self.last_output_dir = self.settings.get("last_output_dir", os.getcwd())
+        self.opts = {**DEFAULT_OPTS, **self.settings.get("opts", {})}
 
         self.init_ui()
 
-        # 전역 단축키: Esc=종료, Space=재생/일시정지 (포커스 위치와 무관하게 동작)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
 
+    # ------------------------- 전역 단축키 / 이스터에그 ------------------------- #
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
@@ -108,7 +284,23 @@ class MainWindow(QMainWindow):
             if key == Qt.Key.Key_Space and not event.isAutoRepeat():
                 self.toggle_play()
                 return True
+            text = event.text().upper()
+            if text.isalpha():
+                self._egg_buf = (self._egg_buf + text)[-8:]
+                if self._egg_buf.endswith("ELON") or self._egg_buf.endswith("MARS"):
+                    self._egg_buf = ""
+                    self.show_elon_hype()
         return super().eventFilter(obj, event)
+
+    def show_elon_hype(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("🚀 To Mars and Beyond")
+        box.setText("<h2 style='color:#2b6cff;'>🚀 ELON MODE ACTIVATED 🚀</h2>"
+                    "<p><b>Occupy Mars. Merge dashcams. Make the future multiplanetary.</b></p>"
+                    f"<p style='color:#9aa0ad;'>{random.choice(ELON_QUOTES)}</p>"
+                    "<p style='color:#9aa0ad;'>— hyped by your friendly Tesla Dashcam Merger</p>")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
 
     # ----------------------------- 설정 ----------------------------- #
     def load_settings(self):
@@ -122,9 +314,10 @@ class MainWindow(QMainWindow):
 
     def save_settings(self):
         self.settings["last_output_dir"] = self.last_output_dir
+        self.settings["opts"] = self.opts
         try:
             with open(self.settings_file, "w") as f:
-                json.dump(self.settings, f)
+                json.dump(self.settings, f, indent=2)
         except Exception as e:
             self.log(f"Failed to save settings: {e}")
 
@@ -133,77 +326,99 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # 상단: 폴더 선택
-        top = QHBoxLayout()
-        self.btn_select_dir = QPushButton("📁 Select Folder")
-        self.btn_select_dir.clicked.connect(self.select_directory)
-        top.addWidget(self.btn_select_dir)
-        self.lbl_count = QLabel("Found: 0 events")
-        top.addWidget(self.lbl_count)
-        top.addStretch()
-        self.btn_select_all = QPushButton("Select All")
-        self.btn_select_all.clicked.connect(lambda: self.list_widget.selectAll())
-        top.addWidget(self.btn_select_all)
-        root.addLayout(top)
+        root.addWidget(self._build_header())
 
-        # 가운데: [ 이벤트 목록 | 미리보기 ] 스플리터
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(14, 12, 14, 12)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(self._build_left())
+        splitter.addWidget(self._build_preview())
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        bl.addWidget(splitter, stretch=1)
 
+        bl.addWidget(self._build_actionbar())
+
+        self.progress_bar = QProgressBar()
+        bl.addWidget(self.progress_bar)
+        self.lbl_status = QLabel("Ready — select a folder to begin.")
+        bl.addWidget(self.lbl_status)
+
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(110)
+        bl.addWidget(self.log_text)
+
+        root.addWidget(body, stretch=1)
+
+    def _build_header(self):
+        head = QWidget()
+        head.setObjectName("Header")
+        h = QHBoxLayout(head)
+        h.setContentsMargins(16, 10, 12, 10)
+        col = QVBoxLayout()
+        title = QLabel("🚗  Tesla Dashcam Merger")
+        title.setObjectName("Title")
+        tag = QLabel("Occupy Mars. Merge dashcams.")
+        tag.setObjectName("Tagline")
+        col.addWidget(title)
+        col.addWidget(tag)
+        h.addLayout(col)
+        h.addStretch()
+        self.btn_folder = QPushButton("📁  Select Folder")
+        self.btn_folder.clicked.connect(self.select_directory)
+        h.addWidget(self.btn_folder)
+        rocket = QPushButton("🚀")
+        rocket.setObjectName("Rocket")
+        rocket.setToolTip("?")
+        rocket.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rocket.clicked.connect(self.show_elon_hype)
+        h.addWidget(rocket)
+        return head
+
+    def _build_left(self):
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(QLabel("Events"))
+        bar = QHBoxLayout()
+        self.lbl_count = QLabel("0 events")
+        bar.addWidget(self.lbl_count)
+        bar.addStretch()
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_select_all.clicked.connect(lambda: self.list_widget.selectAll())
+        bar.addWidget(self.btn_select_all)
+        lv.addLayout(bar)
+
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.list_widget.currentItemChanged.connect(self.on_current_changed)
         lv.addWidget(self.list_widget)
-        splitter.addWidget(left)
-
-        splitter.addWidget(self._build_preview())
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        root.addWidget(splitter, stretch=3)
-
-        # 옵션
-        root.addWidget(self._build_options())
-
-        # 처리 버튼 + 진행률 + 로그
-        self.btn_process = QPushButton("▶  Process Selected")
-        self.btn_process.clicked.connect(self.start_processing)
-        self.btn_process.setEnabled(False)
-        root.addWidget(self.btn_process)
-
-        self.progress_bar = QProgressBar()
-        root.addWidget(self.progress_bar)
-        self.lbl_status = QLabel("Ready")
-        root.addWidget(self.lbl_status)
-
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(140)
-        root.addWidget(self.log_text)
+        return left
 
     def _build_preview(self):
         box = QGroupBox("Preview — original clip")
         v = QVBoxLayout(box)
 
-        # 16:9 레터박스 컨테이너 안에 비디오 위젯 배치
         self.video_widget = QVideoWidget()
         self.video_widget.setStyleSheet("background:#000;")
         self.video_frame = AspectRatioWidget(self.video_widget, 16 / 9)
         self.video_frame.setMinimumSize(480, 270)
         v.addWidget(self.video_frame, stretch=1)
 
-        # 앵글 선택
         angle_row = QHBoxLayout()
         angle_row.addWidget(QLabel("Angle:"))
         self.combo_angle = QComboBox()
+        self.combo_angle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.combo_angle.currentIndexChanged.connect(self.on_angle_changed)
         angle_row.addWidget(self.combo_angle, stretch=1)
         v.addLayout(angle_row)
 
-        # 트랜스포트
         trans = QHBoxLayout()
         self.btn_play = QPushButton()
         self.btn_play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -220,7 +435,6 @@ class MainWindow(QMainWindow):
         trans.addWidget(self.lbl_time)
         v.addLayout(trans)
 
-        # 플레이어
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.player.setAudioOutput(self.audio_output)
@@ -233,52 +447,36 @@ class MainWindow(QMainWindow):
         self._set_preview_enabled(False)
         return box
 
-    def _build_options(self):
-        box = QGroupBox("Output Options")
-        grid = QGridLayout(box)
-
+    def _build_actionbar(self):
+        box = QGroupBox("Export")
+        h = QHBoxLayout(box)
+        h.addWidget(QLabel("Layout:"))
         self.combo_layout = QComboBox()
-        self.combo_layout.addItems(list(LAYOUTS))
-        self.combo_encoding = QComboBox()
-        self.combo_encoding.addItems(["hevc_videotoolbox (GPU)", "libx264 (CPU)"])
-        self.combo_resolution = QComboBox()
-        self.combo_resolution.addItems(list(RESOLUTION_PRESETS))
-        self.combo_resolution.setCurrentText("1080p (1920)")
-        self.combo_fps = QComboBox()
-        self.combo_fps.addItems(["24", "30", "60"])
-        self.combo_fps.setCurrentText("30")
-        self.combo_speed = QComboBox()
-        self.combo_speed.addItems(["1x", "2x", "4x", "8x", "16x"])
-        self.combo_quality = QComboBox()
-        self.combo_quality.addItems(["Bitrate", "Quality (CRF)"])
-        self.combo_quality.currentTextChanged.connect(self._sync_quality)
-        self.combo_bitrate = QComboBox()
-        self.combo_bitrate.addItems(["5M", "8M", "10M", "15M", "20M", "30M", "50M"])
-        self.combo_bitrate.setCurrentText("20M")
-        self.combo_crf = QComboBox()
-        self.combo_crf.addItems([str(x) for x in range(16, 33, 2)])
-        self.combo_crf.setCurrentText("20")
-        self.chk_timestamp = QCheckBox("Timestamp")
-        self.chk_timestamp.setChecked(True)
-        self.chk_labels = QCheckBox("Camera labels")
-        self.chk_labels.setChecked(True)
-
-        def row(r, *widgets):
-            for c, w in enumerate(widgets):
-                grid.addWidget(w, r, c)
-
-        row(0, QLabel("Layout:"), self.combo_layout, QLabel("Encoding:"), self.combo_encoding)
-        row(1, QLabel("Resolution:"), self.combo_resolution, QLabel("FPS:"), self.combo_fps)
-        row(2, QLabel("Speed:"), self.combo_speed, QLabel("Quality:"), self.combo_quality)
-        row(3, QLabel("Bitrate:"), self.combo_bitrate, QLabel("CRF:"), self.combo_crf)
-        row(4, self.chk_timestamp, self.chk_labels)
-        self._sync_quality(self.combo_quality.currentText())
+        for key in LAYOUTS:
+            self.combo_layout.addItem(LAYOUT_LABELS.get(key, key), key)
+        h.addWidget(self.combo_layout)
+        h.addStretch()
+        self.btn_settings = QPushButton("⚙  Export Settings…")
+        self.btn_settings.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_settings.clicked.connect(self.open_export_settings)
+        h.addWidget(self.btn_settings)
+        self.btn_process = QPushButton("▶  Export Selected")
+        self.btn_process.setObjectName("Primary")
+        self.btn_process.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.btn_process.clicked.connect(self.start_processing)
+        self.btn_process.setEnabled(False)
+        h.addWidget(self.btn_process)
         return box
 
-    def _sync_quality(self, mode):
-        crf = mode.startswith("Quality")
-        self.combo_crf.setEnabled(crf)
-        self.combo_bitrate.setEnabled(not crf)
+    def open_export_settings(self):
+        dlg = ExportSettingsDialog(self.opts, self)
+        if dlg.exec():
+            self.opts = dlg.get_opts()
+            self.save_settings()
+            o = self.opts
+            self.log(f"Export settings: {o['encoding']}, "
+                     f"{o['width'] or 'orig'}px, {o['fps']}fps, {o['speed']}x, "
+                     f"{'CRF '+str(o['crf']) if o['quality']=='crf' else o['bitrate']}")
 
     # ----------------------------- 로그 ----------------------------- #
     def log(self, msg):
@@ -307,9 +505,9 @@ class MainWindow(QMainWindow):
         for ts in sorted(self.events):
             cams = len(self.events[ts])
             dur = self.processor.event_duration(ts)
-            self.list_widget.addItem(f"{ts}   ({dur:.0f}s, {cams} cams)")
+            self.list_widget.addItem(f"{ts}   ({dur:.0f}s · {cams} cams)")
 
-        self.lbl_count.setText(f"Found: {len(self.events)} events"
+        self.lbl_count.setText(f"{len(self.events)} events"
                                + (f"  •  {reason}" if reason else ""))
         self.btn_process.setEnabled(len(self.events) > 0)
         self.lbl_status.setText(
@@ -344,13 +542,11 @@ class MainWindow(QMainWindow):
         for cam in ANGLE_ORDER:
             if cam in cams:
                 self.combo_angle.addItem(CAMERA_LABELS.get(cam, cam.upper()), cam)
-        # 기본값 FRONT
         idx = self.combo_angle.findData("front")
         self.combo_angle.setCurrentIndex(max(0, idx))
         self.combo_angle.blockSignals(False)
 
     def on_angle_changed(self, _idx):
-        # 앵글만 바꿀 때는 현재 위치/재생상태 유지
         self._load_preview(reset=False)
 
     def _load_preview(self, reset):
@@ -376,11 +572,12 @@ class MainWindow(QMainWindow):
             if self._want_play:
                 self.player.play()
             else:
-                # 일시정지 상태로 첫 프레임을 보여주기
                 self.player.play()
                 self.player.pause()
 
     def toggle_play(self):
+        if not self.btn_play.isEnabled():
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
@@ -401,7 +598,6 @@ class MainWindow(QMainWindow):
         self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
 
     def on_slider_pressed(self):
-        # 드래그 시작: 재생 중이었는지 기억하고, 매끄러운 탐색을 위해 잠시 일시정지
         self._user_seeking = True
         self._was_playing = (
             self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
@@ -409,33 +605,27 @@ class MainWindow(QMainWindow):
             self.player.pause()
 
     def on_slider_moved(self, pos):
-        # 드래그하는 동안 해당 프레임을 실시간으로 미리보기
+        # 드래그하는 동안 해당 프레임을 실시간 미리보기
         self.player.setPosition(pos)
         self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
 
     def on_slider_released(self):
         self._user_seeking = False
         self.player.setPosition(self.slider.value())
-        # 재생 중에 긁었으면 놓은 뒤 자동으로 이어서 재생
-        if getattr(self, "_was_playing", False):
-            self.player.play()
+        # 재생 중에 긁었으면, seek가 반영된 다음 이벤트 루프에서 바로 재생 재개
+        if self._was_playing:
+            QTimer.singleShot(0, self.player.play)
         self._was_playing = False
 
     # --------------------------- 설정 수집 --------------------------- #
     def build_config(self):
-        quality = "crf" if self.combo_quality.currentText().startswith("Quality") else "bitrate"
-        speed = float(self.combo_speed.currentText().rstrip("x"))
+        o = self.opts
         return MergeConfig(
-            encoding=self.combo_encoding.currentText().split(" ")[0],
-            quality_mode=quality,
-            bitrate=self.combo_bitrate.currentText(),
-            crf=int(self.combo_crf.currentText()),
-            fps=int(self.combo_fps.currentText()),
-            width=RESOLUTION_PRESETS[self.combo_resolution.currentText()],
-            speed=speed,
-            layout=self.combo_layout.currentText(),
-            show_timestamp=self.chk_timestamp.isChecked(),
-            show_labels=self.chk_labels.isChecked(),
+            encoding=o["encoding"], quality_mode=o["quality"],
+            bitrate=o["bitrate"], crf=o["crf"], fps=o["fps"],
+            width=o["width"], speed=o["speed"],
+            layout=self.combo_layout.currentData(),
+            show_timestamp=o["timestamp"], show_labels=o["labels"],
             preset="medium",
         )
 
@@ -445,8 +635,8 @@ class MainWindow(QMainWindow):
         if not items:
             if self.list_widget.count() == 0:
                 return
-            reply = QMessageBox.question(self, "Process All?",
-                                         "No events selected. Process ALL events?")
+            reply = QMessageBox.question(self, "Export All?",
+                                         "No events selected. Export ALL events?")
             if reply != QMessageBox.StandardButton.Yes:
                 return
             items = [self.list_widget.item(i) for i in range(self.list_widget.count())]
@@ -499,8 +689,8 @@ class MainWindow(QMainWindow):
         self.done_output_secs = 0.0
         self.progress_bar.setValue(0)
         self.btn_process.setEnabled(False)
-        self.btn_select_dir.setEnabled(False)
-        self.log(f"Processing {len(self.queue)} events (merge={self.merge_mode}, "
+        self.btn_folder.setEnabled(False)
+        self.log(f"Exporting {len(self.queue)} events (merge={self.merge_mode}, "
                  f"layout={self.config.layout}, {self.config.width or 'orig'}px, "
                  f"{self.config.speed}x)...")
         self.process_next()
@@ -583,14 +773,16 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"cleanup_temp failed: {e}")
         self.progress_bar.setValue(100)
-        self.lbl_status.setText("✅ Processing Complete!")
+        self.lbl_status.setText("✅ Export complete!  🚀 To Mars!")
         self.btn_process.setEnabled(True)
-        self.btn_select_dir.setEnabled(True)
-        QMessageBox.information(self, "Done", "Processing complete.")
+        self.btn_folder.setEnabled(True)
+        QMessageBox.information(self, "Done",
+                                "Export complete. 🚀\nElon would be proud.")
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    apply_dark_theme(app)
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
