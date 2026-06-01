@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# 앱 로컬 설정 (사용자별 경로 등 저장)
+settings.json
+
+# Tesla 블랙박스 원본/결과 영상 (용량이 크므로 추적 제외)
+*.mp4
+*.mp4.txt
+thumb.png
+merged_test/
+2025-*/
+
+# IDE
+.idea/
+.vscode/
