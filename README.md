@@ -1,92 +1,107 @@
 # Tesla Dashcam Merger
 
-테슬라 블랙박스(Dashcam / Sentry) 영상을 **4분할 화면 하나로 합쳐주는** macOS용 데스크톱 앱입니다.
-테슬라는 한 시점의 영상을 카메라(전방/후방/좌우 리피터 등)별로 따로 저장하는데, 이 앱은 같은 시각의 클립들을 모아 하나의 영상으로 합성하고, 화면 하단에 촬영 시각 타임스탬프를 새겨 넣습니다.
+테슬라 블랙박스(Dashcam / Sentry) 영상을 **하나의 멀티뷰 영상으로 합쳐주는** macOS용 앱입니다.
+테슬라는 한 시점의 영상을 카메라(전방/후방/좌·우 리피터/좌·우 B필러)별로 따로 저장하는데,
+이 앱은 같은 시각의 클립들을 모아 한 화면으로 합성하고, 하단에 **매초 갱신되는 타임스탬프**와
+각 화면의 **카메라 라벨**을 새겨 넣습니다.
 
-PyQt6로 만든 GUI에서 폴더를 고르면 이벤트 목록이 뜨고, 선택한 이벤트들을 **개별 변환**하거나 **하나의 긴 영상으로 병합**할 수 있습니다. 실제 영상 처리는 시스템에 설치된 **FFmpeg**가 담당합니다.
+**GUI(PyQt6)** 와 **CLI** 두 가지로 쓸 수 있고, 실제 영상 처리는 **FFmpeg**가 담당합니다.
 
 ---
 
 ## 빠른 시작
 
-### 1. 사전 요구사항
-- **Python 3.x** (개발/검증은 3.14에서 진행)
-- **FFmpeg / ffprobe** — Homebrew로 설치:
-  ```bash
-  brew install ffmpeg
-  ```
+### 사전 요구사항
+- **Python 3.x**
+- **FFmpeg / ffprobe** (`brew install ffmpeg`)
 
-### 2. 셋업 & 실행
+### 셋업 & 실행
 ```bash
-# 한 번에 실행 (가상환경 없으면 자동 생성 + 설치)
-./run.sh
-```
-
-또는 수동으로:
-```bash
+./run.sh                      # 가상환경 자동 셋업 + GUI 실행
+# 또는 수동
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python main.py
+.venv/bin/python main.py      # GUI
 ```
 
-### 3. 사용법
-1. **Select Folder** — 테슬라 블랙박스 영상이 들어있는 폴더 선택
-2. 같은 시각의 4개 카메라가 모두 있는 이벤트만 목록에 표시됨
-3. 변환할 이벤트 선택 (여러 개 다중 선택 가능)
-4. **Encoding** / **Bitrate** 옵션 선택
-   - `hevc_videotoolbox (GPU)` — Mac 하드웨어 가속 (빠름)
-   - `libx264 (CPU)` — 호환성 높음 (느림)
-5. **Process Selected** 클릭
-   - 1개 선택 → 단일 파일로 저장
-   - 여러 개 선택 → **병합(하나로 이어붙이기)** 또는 **일괄 변환(각각 저장)** 선택
-
----
-
-## 파일 구조와 역할
-
-| 파일 / 폴더 | 역할 |
-|---|---|
-| **`main.py`** | 앱 진입점. `QApplication`을 만들고 `gui.py`의 `MainWindow`를 띄웁니다. 실행은 항상 이 파일로 시작합니다. |
-| **`gui.py`** | PyQt6 GUI 본체 (`MainWindow`). 폴더 선택, 이벤트 목록 표시, 인코딩/비트레이트 옵션, 진행률 표시줄, 로그 창을 담당합니다. FFmpeg는 `QProcess`로 비동기 실행하며, 여러 이벤트를 큐(queue)로 순차 처리합니다. 병합 모드에서는 임시 폴더에 세그먼트를 만든 뒤 마지막에 이어붙입니다(concat). |
-| **`processor.py`** | 영상 처리 **핵심 로직** (`TeslaDashcamProcessor`). GUI가 없어도 동작합니다. 주요 메서드: <br>• `find_events()` — 폴더를 스캔해 파일명(`날짜시각-카메라.mp4`)을 정규식으로 파싱하고, 같은 시각끼리 묶어 4개 카메라가 모두 있는 이벤트만 반환<br>• `get_video_info()` — `ffprobe`로 해상도/길이 조회<br>• `generate_ffmpeg_command()` — 4분할(xstack) 합성 + 타임스탬프 자막을 그리는 FFmpeg 명령 생성<br>• `generate_concat_command()` — 여러 영상을 이어붙이는 명령 생성 |
-| **`verify_cli.py`** | GUI 없이 터미널에서 동작을 검증하는 테스트 스크립트. 샘플 폴더를 스캔해 첫 이벤트를 실제로 합성해 봅니다. |
-| **`requirements.txt`** | Python 의존성 목록 (`PyQt6`). |
-| **`run.sh`** | 가상환경 자동 셋업 + 앱 실행 스크립트. |
-| **`settings.json`** | 앱이 자동 생성/관리하는 로컬 설정 (마지막 저장 폴더 등). git 추적 제외. |
-| **`.venv/`** | Python 가상환경 (git 추적 제외). |
-| **`__pycache__/`** | Python 바이트코드 캐시 (git 추적 제외). |
-| **`2025-11-29_*/`** | 테슬라 블랙박스 **원본 영상 샘플 폴더**. 카메라별 `.mp4`, `event.json`(이벤트 메타데이터), `thumb.png`(썸네일) 포함. 용량이 크므로 git 추적 제외. |
-
----
-
-## 동작 원리 (영상 합성)
-
-테슬라 파일명 규칙: `2025-11-29_16-42-04-front.mp4`
-→ `(타임스탬프)-(카메라)` 형태로 파싱합니다.
-
-합성 시:
-- **전방(front)** 카메라를 위쪽 전체에 크게 배치
-- **좌측 리피터 / 후방 / 우측 리피터**를 아래쪽에 1/3 크기로 가로 배치 (`xstack`)
-- 화면 하단 중앙에 **촬영 시각 타임스탬프**를 매초 갱신되며 표시 (아래 "타임스탬프 처리" 참고)
-- 파일명 시각을 클립의 **종료 시각**으로 보고, 영상 길이만큼 빼서 시작 시각을 계산
-- 재생 호환성을 위해 **30fps CFR**, `yuv420p`로 정규화
-
-> 참고: `processor.py`는 필수 카메라를 `front / left_repeater / back / right_repeater` 4종으로 가정합니다. 샘플 폴더에는 `left_pillar / right_pillar`(B필러 카메라, 최신 모델) 영상도 함께 들어있지만 현재 합성에는 사용하지 않습니다.
-
-### 타임스탬프 처리 (freetype 비의존)
-
-영상에 시각 자막을 새기는 방식으로 FFmpeg의 `drawtext` 필터를 쓰는 게 일반적이지만, **Homebrew core의 FFmpeg는 라이선스 정책상 `libfreetype` 없이 빌드**되어 `drawtext`·`subtitles`·`libass` 텍스트 필터가 전부 빠져 있습니다. 확인:
+### CLI
 ```bash
-ffmpeg -filters | grep -E 'drawtext|subtitles'   # 비어 있으면 텍스트 필터 없음
+# 이벤트 목록 (길이/카메라 수/가능한 레이아웃)
+.venv/bin/python cli.py <폴더> --list
+
+# 전체를 6분할 1080p로 개별 변환 (GPU 인코딩)
+.venv/bin/python cli.py <폴더> --all --layout grid6 --width 1920
+
+# 특정 이벤트들을 하나로 머지하면서 4배속 타임랩스
+.venv/bin/python cli.py <폴더> -s 0 -s 1 -s 2 --merge -o drive.mp4 --speed 4
+
+# CPU 인코딩 + 화질(CRF) 모드
+.venv/bin/python cli.py <폴더> --all --encoding libx264 --quality crf --crf 20
 ```
+전체 옵션은 `cli.py --help` 참고.
 
-그래서 이 앱은 시스템 FFmpeg 빌드에 의존하지 않는 방식을 씁니다:
+---
 
-1. **Pillow**로 매 초의 타임스탬프 텍스트를 PNG 한 장씩 렌더링 (Pillow는 freetype를 자체 번들 → 시스템과 무관하게 동작)
-2. 이 PNG들을 `-framerate 1` 입력 시퀀스로 넣고, FFmpeg의 기본 필터인 **`overlay`** 로 합성 화면 하단 중앙에 얹음
+## 옵션
 
-덕분에 별도 FFmpeg 재빌드 없이 어떤 환경에서도 동작합니다. PNG는 출력 파일 옆 숨김 임시 폴더(`.<이름>_ts/`)에 생성되며, 처리 완료 후 `cleanup_temp()`으로 자동 삭제됩니다.
+| 옵션 | 설명 |
+|---|---|
+| **Layout** | `classic`(전방+하단3분할), `grid6`(2×3 6분할, B필러 포함), `front`(전방만) |
+| **Encoding** | `hevc_videotoolbox`(Mac GPU 가속) / `libx264`(CPU, 호환성↑) |
+| **Quality** | `bitrate`(목표 비트레이트) / `crf`(화질 기준, 낮을수록 고화질) |
+| **Resolution** | Original / 1440p / 1080p / 720p / 480p |
+| **FPS** | 24 / 30 / 60 |
+| **Speed** | 1×~16× 타임랩스 (긴 센트리 영상 빠르게 검토) |
+| **Timestamp** | 하단 중앙 시각 자막 on/off, 포맷 지정 가능 |
+| **Camera labels** | 각 화면 좌상단 카메라 이름(FRONT/BACK/…) on/off |
 
-## 개발 메모
-- 영상 처리 로직(`processor.py`)과 UI(`gui.py`)가 분리되어 있어, 로직은 `verify_cli.py`로 GUI 없이 단독 테스트 가능합니다.
-- FFmpeg 명령을 직접 실행하므로, 동작이 이상하면 로그 창에 출력되는 `Command:` 줄을 복사해 터미널에서 직접 실행해보면 디버깅에 도움이 됩니다.
+---
+
+## 파일 구조
+
+| 파일 | 역할 |
+|---|---|
+| **`main.py`** | GUI 진입점 |
+| **`gui.py`** | PyQt6 GUI (`MainWindow`). 폴더 선택·이벤트 목록·옵션 패널·진행률·로그. FFmpeg를 `QProcess`로 비동기 실행하며 머지 시 세그먼트 큐를 순차 처리 |
+| **`processor.py`** | 핵심 로직. `MergeConfig`(옵션 묶음) + `TeslaDashcamProcessor`. 이벤트 탐색, 레이아웃 기하 계산, Pillow 오버레이(타임스탬프/라벨) 렌더링, FFmpeg 명령·concat 명령 생성 |
+| **`cli.py`** | 커맨드라인 인터페이스 (목록/배치/머지). `processor`의 명령 생성을 그대로 공유 |
+| **`verify_cli.py`** | GUI 없이 핵심 파이프라인을 빠르게 검증하는 스모크 테스트 |
+| **`requirements.txt`** | `PyQt6`, `Pillow` |
+| **`run.sh`** | 가상환경 자동 셋업 + 실행 |
+| **`settings.json`** | 마지막 출력 폴더 등 로컬 설정(자동 생성, git 제외) |
+| **`2025-11-29_*/`** | 테슬라 원본 영상 샘플 폴더. 카메라별 `.mp4` + `event.json`(GPS·사유 등 메타) + `thumb.png` |
+
+---
+
+## 동작 원리
+
+### 합성
+1. `find_events()`가 파일명(`날짜시각-카메라.mp4`)을 파싱해 같은 시각끼리 묶음
+2. 선택 레이아웃의 타일 기하를 계산 → 각 카메라를 `scale` 후 `xstack`으로 배치
+3. **카메라 라벨**(전체 캔버스 1장)과 **타임스탬프**(매초 PNG 시퀀스)를 `overlay`로 합성
+4. 다운스케일 → 배속(`setpts`) → CFR(`fps`) → `yuv420p`로 정규화
+
+### 타임스탬프/라벨이 freetype에 의존하지 않는 이유
+Homebrew core의 FFmpeg는 라이선스 정책상 `libfreetype` 없이 빌드되어
+`drawtext`·`subtitles`·`libass` 텍스트 필터가 **전부 없습니다**. 그래서 텍스트는
+**Pillow로 PNG를 렌더링**(Pillow는 freetype를 자체 번들)한 뒤 FFmpeg 기본 `overlay`
+필터로 얹습니다. 덕분에 FFmpeg 재빌드 없이 어디서나 동작합니다.
+임시 PNG는 처리 후 `cleanup_temp()`으로 자동 삭제됩니다.
+
+### 머지 시 재생 속도가 느려지던 문제 (해결됨)
+예전에는 각 이벤트를 mp4로 인코딩한 뒤 `-c copy`로 이어붙였는데, mp4 세그먼트 경계에서
+타임스탬프(PTS)가 어긋나 **재생 중 어느 순간부터 프레임이 느려지는** 현상이 있었습니다.
+
+해결: 머지용 세그먼트를 **MPEG-TS 컨테이너 + 닫힌 GOP(`-g`/`-keyint_min`) + 강제 CFR**로
+인코딩한 뒤 copy로 이어붙입니다. TS는 세그먼트 경계의 타임스탬프를 깔끔하게 리셋하므로
+최종 영상의 프레임 간격이 전 구간 일정(`avg_frame_rate == fps`)해져 슬로우다운이 사라집니다.
+(`verify_cli.py`가 머지 결과의 길이·CFR 연속성을 자동 검증합니다.)
+
+---
+
+## 검증
+```bash
+.venv/bin/python verify_cli.py          # 각 레이아웃 + 머지 연속성 스모크 테스트
+```
+저해상도/고속 설정으로 단일 합성(classic·grid6·front)과 3개 이벤트 머지를 돌려
+명령 생성·실행과 머지 결과의 CFR 연속성을 확인합니다.

@@ -1,47 +1,66 @@
-import sys
-import os
-import json
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QFileDialog, QListWidget, 
-                             QLabel, QComboBox, QProgressBar, QMessageBox, QTextEdit)
-from PyQt6.QtCore import QProcess, Qt
-from processor import TeslaDashcamProcessor
+"""
+Tesla Dashcam Merger — PyQt6 GUI.
 
+폴더를 선택해 이벤트를 목록으로 보고, 레이아웃/인코딩/해상도/배속 등 옵션을 골라
+개별 변환하거나 하나로 머지한다. 영상 처리 명령은 processor.py가 생성하고,
+실행은 QProcess로 비동기 수행한다.
+"""
+
+import os
+import re
+import sys
+import json
 import shutil
 import tempfile
+
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QGridLayout, QPushButton, QFileDialog,
+                             QListWidget, QLabel, QComboBox, QProgressBar,
+                             QMessageBox, QTextEdit, QCheckBox, QGroupBox)
+from PyQt6.QtCore import QProcess
+
+from processor import (TeslaDashcamProcessor, MergeConfig,
+                       LAYOUTS, RESOLUTION_PRESETS)
+
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Tesla Dashcam Merger")
-        self.resize(800, 600)
+        self.resize(900, 720)
 
         self.processor = TeslaDashcamProcessor()
         self.current_directory = ""
         self.events = {}
-        self.queue = []
-        self.total_queue = 0
-        self.current_process = None
-        
-        # Merge Logic
+
+        # 처리 큐 / 상태
+        self.queue = []                 # [(timestamp, output_path)]
         self.merge_mode = False
         self.temp_dir = None
         self.generated_segments = []
         self.final_output_file = ""
-        
-        # Settings
-        self.settings_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+        self.current_process = None
+        self.config = None
+
+        # 진행률(실제 길이 기반)
+        self.total_output_secs = 0.0
+        self.done_output_secs = 0.0
+        self.current_event_secs = 0.0
+
+        self.settings_file = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "settings.json")
         self.settings = self.load_settings()
         self.last_output_dir = self.settings.get("last_output_dir", os.getcwd())
 
         self.init_ui()
 
+    # ----------------------------- 설정 ----------------------------- #
     def load_settings(self):
         if os.path.exists(self.settings_file):
             try:
-                with open(self.settings_file, "r") as f:
+                with open(self.settings_file) as f:
                     return json.load(f)
-            except:
+            except Exception:
                 pass
         return {}
 
@@ -53,66 +72,102 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"Failed to save settings: {e}")
 
+    # ------------------------------ UI ------------------------------ #
     def init_ui(self):
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
 
-        # Top controls
-        top_layout = QHBoxLayout()
-        
-        self.btn_select_dir = QPushButton("Select Folder")
+        # 상단: 폴더 선택
+        top = QHBoxLayout()
+        self.btn_select_dir = QPushButton("📁 Select Folder")
         self.btn_select_dir.clicked.connect(self.select_directory)
-        top_layout.addWidget(self.btn_select_dir)
-
+        top.addWidget(self.btn_select_dir)
         self.lbl_count = QLabel("Found: 0 events")
-        top_layout.addWidget(self.lbl_count)
-        
-        layout.addLayout(top_layout)
+        top.addWidget(self.lbl_count)
+        top.addStretch()
+        self.btn_select_all = QPushButton("Select All")
+        self.btn_select_all.clicked.connect(lambda: self.list_widget.selectAll())
+        top.addWidget(self.btn_select_all)
+        root.addLayout(top)
 
-        # Event List
+        # 이벤트 목록
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        layout.addWidget(self.list_widget)
+        root.addWidget(self.list_widget, stretch=2)
 
-        # Encoding Options
-        options_layout = QHBoxLayout()
-        options_layout.addWidget(QLabel("Encoding:"))
-        self.combo_encoding = QComboBox()
-        self.combo_encoding.addItems(["hevc_videotoolbox (GPU)", "libx264 (CPU)"])
-        options_layout.addWidget(self.combo_encoding)
-        
-        options_layout.addWidget(QLabel("Bitrate:"))
-        self.combo_bitrate = QComboBox()
-        self.combo_bitrate.addItems(["5M", "8M", "10M", "15M", "20M", "30M"])
-        self.combo_bitrate.setCurrentText("20M")
-        options_layout.addWidget(self.combo_bitrate)
-        
-        layout.addLayout(options_layout)
+        # 옵션 그룹
+        root.addWidget(self._build_options())
 
-        # Process Controls
-        self.btn_process = QPushButton("Process Selected")
+        # 처리 버튼 + 진행률
+        self.btn_process = QPushButton("▶  Process Selected")
         self.btn_process.clicked.connect(self.start_processing)
         self.btn_process.setEnabled(False)
-        layout.addWidget(self.btn_process)
+        root.addWidget(self.btn_process)
 
         self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
-        
+        root.addWidget(self.progress_bar)
         self.lbl_status = QLabel("Ready")
-        layout.addWidget(self.lbl_status)
-        
-        # Log Window
+        root.addWidget(self.lbl_status)
+
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        layout.addWidget(self.log_text)
+        root.addWidget(self.log_text, stretch=1)
 
-    def log(self, message):
-        self.log_text.append(message)
-        # Scroll to bottom
+    def _build_options(self):
+        box = QGroupBox("Options")
+        grid = QGridLayout(box)
+
+        self.combo_layout = QComboBox()
+        self.combo_layout.addItems(list(LAYOUTS))           # classic/grid6/front
+        self.combo_encoding = QComboBox()
+        self.combo_encoding.addItems(["hevc_videotoolbox (GPU)", "libx264 (CPU)"])
+        self.combo_resolution = QComboBox()
+        self.combo_resolution.addItems(list(RESOLUTION_PRESETS))
+        self.combo_resolution.setCurrentText("1080p (1920)")
+        self.combo_fps = QComboBox()
+        self.combo_fps.addItems(["24", "30", "60"])
+        self.combo_fps.setCurrentText("30")
+        self.combo_speed = QComboBox()
+        self.combo_speed.addItems(["1x", "2x", "4x", "8x", "16x"])
+        self.combo_quality = QComboBox()
+        self.combo_quality.addItems(["Bitrate", "Quality (CRF)"])
+        self.combo_quality.currentTextChanged.connect(self._sync_quality)
+        self.combo_bitrate = QComboBox()
+        self.combo_bitrate.addItems(["5M", "8M", "10M", "15M", "20M", "30M", "50M"])
+        self.combo_bitrate.setCurrentText("20M")
+        self.combo_crf = QComboBox()
+        self.combo_crf.addItems([str(x) for x in range(16, 33, 2)])
+        self.combo_crf.setCurrentText("20")
+        self.chk_timestamp = QCheckBox("Timestamp")
+        self.chk_timestamp.setChecked(True)
+        self.chk_labels = QCheckBox("Camera labels")
+        self.chk_labels.setChecked(True)
+
+        def row(r, *widgets):
+            for c, w in enumerate(widgets):
+                grid.addWidget(w, r, c)
+
+        row(0, QLabel("Layout:"), self.combo_layout, QLabel("Encoding:"), self.combo_encoding)
+        row(1, QLabel("Resolution:"), self.combo_resolution, QLabel("FPS:"), self.combo_fps)
+        row(2, QLabel("Speed:"), self.combo_speed, QLabel("Quality:"), self.combo_quality)
+        row(3, QLabel("Bitrate:"), self.combo_bitrate, QLabel("CRF:"), self.combo_crf)
+        row(4, self.chk_timestamp, self.chk_labels)
+        self._sync_quality(self.combo_quality.currentText())
+        return box
+
+    def _sync_quality(self, mode):
+        crf = mode.startswith("Quality")
+        self.combo_crf.setEnabled(crf)
+        self.combo_bitrate.setEnabled(not crf)
+
+    # ----------------------------- 로그 ----------------------------- #
+    def log(self, msg):
+        self.log_text.append(msg)
         sb = self.log_text.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+    # --------------------------- 폴더 스캔 --------------------------- #
     def select_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Tesla Dashcam Folder")
         if directory:
@@ -122,94 +177,108 @@ class MainWindow(QMainWindow):
     def scan_directory(self):
         self.events = self.processor.find_events(self.current_directory)
         self.list_widget.clear()
-        
-        sorted_timestamps = sorted(self.events.keys())
-        for ts in sorted_timestamps:
-            self.list_widget.addItem(ts)
-            
-        self.lbl_count.setText(f"Found: {len(self.events)} events")
+        meta = self.processor.read_event_meta(self.current_directory)
+        reason = (meta or {}).get("reason", "")
+
+        for ts in sorted(self.events):
+            cams = len(self.events[ts])
+            dur = self.processor.event_duration(ts)
+            self.list_widget.addItem(f"{ts}   ({dur:.0f}s, {cams} cams)")
+
+        self.lbl_count.setText(f"Found: {len(self.events)} events"
+                               + (f"  •  {reason}" if reason else ""))
         self.btn_process.setEnabled(len(self.events) > 0)
-        self.lbl_status.setText(f"Loaded {len(self.events)} events from {os.path.basename(self.current_directory)}")
-        self.log(f"Scanned {self.current_directory}. Found {len(self.events)} valid events.")
+        self.lbl_status.setText(
+            f"Loaded {len(self.events)} events from {os.path.basename(self.current_directory)}")
+        self.log(f"Scanned {self.current_directory}: {len(self.events)} events.")
 
+    # --------------------------- 설정 수집 --------------------------- #
+    def _item_timestamp(self, item):
+        # 표시 텍스트에서 타임스탬프 부분만 추출
+        return item.text().split()[0]
+
+    def build_config(self):
+        quality = "crf" if self.combo_quality.currentText().startswith("Quality") else "bitrate"
+        speed = float(self.combo_speed.currentText().rstrip("x"))
+        return MergeConfig(
+            encoding=self.combo_encoding.currentText().split(" ")[0],
+            quality_mode=quality,
+            bitrate=self.combo_bitrate.currentText(),
+            crf=int(self.combo_crf.currentText()),
+            fps=int(self.combo_fps.currentText()),
+            width=RESOLUTION_PRESETS[self.combo_resolution.currentText()],
+            speed=speed,
+            layout=self.combo_layout.currentText(),
+            show_timestamp=self.chk_timestamp.isChecked(),
+            show_labels=self.chk_labels.isChecked(),
+            preset="medium",
+        )
+
+    # --------------------------- 처리 시작 --------------------------- #
     def start_processing(self):
-        selected_items = self.list_widget.selectedItems()
-        if not selected_items:
-            if self.list_widget.count() > 0:
-                reply = QMessageBox.question(self, "Process All?", "No events selected. Process ALL events?", 
-                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if reply == QMessageBox.StandardButton.Yes:
-                    selected_items = [self.list_widget.item(i) for i in range(self.list_widget.count())]
-                else:
-                    return
-            else:
+        items = self.list_widget.selectedItems()
+        if not items:
+            if self.list_widget.count() == 0:
                 return
+            reply = QMessageBox.question(self, "Process All?",
+                                         "No events selected. Process ALL events?")
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            items = [self.list_widget.item(i) for i in range(self.list_widget.count())]
 
-        # Determine Output Location and Mode
+        timestamps = [self._item_timestamp(i) for i in items]
+        self.config = self.build_config()
         self.generated_segments = []
         self.merge_mode = False
         self.temp_dir = None
-        
-        if len(selected_items) > 1:
-            # Multiple files -> Ask if merge or batch
-            reply = QMessageBox.question(self, "Merge Files?", "Multiple events selected.\nDo you want to MERGE them into a single video file?", 
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                self.merge_mode = True
-                # Ask for single output file
-                default_name = os.path.join(self.last_output_dir, f"merged_video.mp4")
-                file_path, _ = QFileDialog.getSaveFileName(self, "Save Merged Video", default_name, "MP4 Files (*.mp4)")
-                if not file_path:
-                    return
-                self.final_output_file = file_path
-                self.last_output_dir = os.path.dirname(file_path)
-                self.save_settings()
-                
-                # Create temp dir
-                self.temp_dir = tempfile.mkdtemp(prefix="tesla_merge_")
-                self.log(f"Created temp dir: {self.temp_dir}")
-                
-                self.queue = []
-                for item in selected_items:
-                    ts = item.text()
-                    out_path = os.path.join(self.temp_dir, f"segment_{ts}.mp4")
-                    self.queue.append((ts, out_path))
-                    
-            else:
-                # Batch mode -> Ask for directory
-                dir_path = QFileDialog.getExistingDirectory(self, "Select Output Folder", self.last_output_dir)
-                if not dir_path:
-                    return
-                self.last_output_dir = dir_path
-                self.save_settings()
-                
-                self.queue = []
-                for item in selected_items:
-                    ts = item.text()
-                    out_path = os.path.join(dir_path, f"merged_{ts}.mp4")
-                    self.queue.append((ts, out_path))
-        else:
-            # Single file
-            ts = selected_items[0].text()
-            default_name = os.path.join(self.last_output_dir, f"merged_{ts}.mp4")
-            file_path, _ = QFileDialog.getSaveFileName(self, "Save Video", default_name, "MP4 Files (*.mp4)")
-            if not file_path:
-                return
-            
-            self.queue = [(ts, file_path)]
-            self.last_output_dir = os.path.dirname(file_path)
-            self.save_settings()
 
-        self.total_queue = len(self.queue)
+        if len(timestamps) > 1:
+            reply = QMessageBox.question(
+                self, "Merge?",
+                "Multiple events selected.\nMERGE into a single continuous video?\n"
+                "(No = save each event as a separate file)")
+            self.merge_mode = (reply == QMessageBox.StandardButton.Yes)
+
         if self.merge_mode:
-            self.total_queue += 1 # Add concat step
-            
+            default = os.path.join(self.last_output_dir, "merged_video.mp4")
+            path, _ = QFileDialog.getSaveFileName(self, "Save Merged Video", default,
+                                                  "MP4 Files (*.mp4)")
+            if not path:
+                return
+            self.final_output_file = path
+            self.last_output_dir = os.path.dirname(path)
+            self.temp_dir = tempfile.mkdtemp(prefix="tesla_merge_")
+            self.queue = [(ts, os.path.join(self.temp_dir, f"seg_{i:03}.ts"))
+                          for i, ts in enumerate(timestamps)]
+        elif len(timestamps) == 1:
+            default = os.path.join(self.last_output_dir, f"merged_{timestamps[0]}.mp4")
+            path, _ = QFileDialog.getSaveFileName(self, "Save Video", default,
+                                                  "MP4 Files (*.mp4)")
+            if not path:
+                return
+            self.last_output_dir = os.path.dirname(path)
+            self.queue = [(timestamps[0], path)]
+        else:
+            out_dir = QFileDialog.getExistingDirectory(self, "Select Output Folder",
+                                                       self.last_output_dir)
+            if not out_dir:
+                return
+            self.last_output_dir = out_dir
+            self.queue = [(ts, os.path.join(out_dir, f"merged_{ts}.mp4"))
+                          for ts in timestamps]
+
+        self.save_settings()
+
+        # 진행률 합계(출력 길이 기준 = 원본/배속)
+        self.total_output_secs = sum(
+            self.processor.event_duration(ts) / self.config.speed for ts, _ in self.queue)
+        self.done_output_secs = 0.0
         self.progress_bar.setValue(0)
         self.btn_process.setEnabled(False)
         self.btn_select_dir.setEnabled(False)
-        
-        self.log(f"Starting processing of {len(self.queue)} events (Merge: {self.merge_mode})...")
+        self.log(f"Processing {len(self.queue)} events (merge={self.merge_mode}, "
+                 f"layout={self.config.layout}, {self.config.width or 'orig'}px, "
+                 f"{self.config.speed}x)...")
         self.process_next()
 
     def process_next(self):
@@ -221,120 +290,80 @@ class MainWindow(QMainWindow):
             return
 
         timestamp, output_file = self.queue.pop(0)
-        self.lbl_status.setText(f"Processing {timestamp} ({self.total_queue - len(self.queue) - (1 if self.merge_mode else 0)}/{self.total_queue})")
-        
+        self.current_event_secs = self.processor.event_duration(timestamp) / self.config.speed
+        container = "mpegts" if self.merge_mode else "mp4"
         if self.merge_mode:
             self.generated_segments.append(output_file)
-        
-        encoding_choice = self.combo_encoding.currentText().split(" ")[0] # "libx264" or "hevc_videotoolbox"
-        bitrate = self.combo_bitrate.currentText()
-        
-        self.log(f"Generating command for {timestamp} -> {os.path.basename(output_file)}...")
+
+        self.lbl_status.setText(f"Processing {timestamp}...")
         try:
-            cmd = self.processor.generate_ffmpeg_command(timestamp, output_file, encoding_choice, bitrate)
+            cmd = self.processor.build_command(timestamp, output_file, self.config, container)
         except Exception as e:
-            self.log(f"Error generating command: {e}")
+            self.log(f"Error building command for {timestamp}: {e}")
             self.process_next()
             return
-        
-        if cmd:
-            self.log(f"Command: {' '.join(cmd)}")
-            self.current_process = QProcess()
-            self.current_process.finished.connect(self.process_finished)
-            self.current_process.readyReadStandardOutput.connect(self.handle_stdout)
-            self.current_process.readyReadStandardError.connect(self.handle_stderr)
-            self.current_process.errorOccurred.connect(self.handle_process_error)
-            self.current_process.start(cmd[0], cmd[1:])
-        else:
-            self.log(f"Failed to generate command for {timestamp}")
+        if not cmd:
+            self.log(f"Skip {timestamp} (no command)")
             self.process_next()
+            return
+
+        self.log(f"$ {' '.join(cmd[:6])} ... [{os.path.basename(output_file)}]")
+        self._spawn(cmd, self.process_finished)
 
     def start_concat(self):
-        self.lbl_status.setText(f"Merging segments...")
-        self.log("Starting concatenation...")
-        
-        cmd, list_file = self.processor.generate_concat_command(self.generated_segments, self.final_output_file)
-        
-        self.log(f"Concat Command: {' '.join(cmd)}")
+        self.lbl_status.setText("Merging segments...")
+        self.log("Concatenating segments (lossless copy)...")
+        cmd, list_file = self.processor.build_concat_command(
+            self.generated_segments, self.final_output_file, self.config)
+        self._concat_list = list_file
+        self._spawn(cmd, self.concat_finished)
+
+    def _spawn(self, cmd, on_finish):
         self.current_process = QProcess()
-        self.current_process.finished.connect(self.concat_finished)
-        self.current_process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.current_process.finished.connect(on_finish)
         self.current_process.readyReadStandardError.connect(self.handle_stderr)
+        self.current_process.errorOccurred.connect(
+            lambda e: self.log(f"Process error: {e}"))
         self.current_process.start(cmd[0], cmd[1:])
 
-    def concat_finished(self, exit_code, exit_status):
-        self.log(f"Concat finished with exit code {exit_code}")
-        
-        # Cleanup temp dir
-        if self.temp_dir and os.path.exists(self.temp_dir):
-            try:
-                shutil.rmtree(self.temp_dir)
-                self.log(f"Cleaned up temp dir: {self.temp_dir}")
-            except Exception as e:
-                self.log(f"Failed to cleanup temp dir: {e}")
-                
-        self.finish_processing()
-
-    def handle_stdout(self):
-        data = self.current_process.readAllStandardOutput()
-        stdout = bytes(data).decode("utf8")
-        self.log(f"[FFmpeg OUT] {stdout}")
-
+    # --------------------------- 진행/완료 --------------------------- #
     def handle_stderr(self):
-        data = self.current_process.readAllStandardError()
-        stderr = bytes(data).decode("utf8")
-        self.log(f"[FFmpeg ERR] {stderr}")
-        
-        # Parse progress
-        import re
-        match = re.search(r"time=(\d{2}):(\d{2}):(\d{2}\.\d{2})", stderr)
-        if match:
-            h, m, s = map(float, match.groups())
-            seconds = h * 3600 + m * 60 + s
-            # Assuming 60s per clip
-            total_duration = 60.0
-            percent_of_file = min(1.0, seconds / total_duration)
-            
-            # Global progress
-            if self.merge_mode and not self.queue: # Concat phase
-                # Concat is fast, just show 99% or something
-                # Or we can track it if we know total duration.
-                # Let's just assume it's the last step.
-                files_done = len(self.generated_segments)
-                total_progress = (files_done + percent_of_file) / self.total_queue * 100
-            else:
-                files_done = self.total_queue - len(self.queue) - (1 if self.merge_mode else 0) - 1
-                total_progress = (files_done + percent_of_file) / self.total_queue * 100
-            
-            self.progress_bar.setValue(int(total_progress))
+        data = bytes(self.current_process.readAllStandardError()).decode("utf8", "ignore")
+        m = re.search(r"time=(\d{2}):(\d{2}):(\d{2}\.\d{2})", data)
+        if m and self.total_output_secs > 0:
+            h, mn, s = map(float, m.groups())
+            cur = min(self.current_event_secs, h * 3600 + mn * 60 + s)
+            pct = (self.done_output_secs + cur) / self.total_output_secs * 100
+            self.progress_bar.setValue(int(min(99, pct)))
 
-    def handle_process_error(self, error):
-        self.log(f"Process Error: {error}")
-
-    def process_finished(self, exit_code, exit_status):
-        self.log(f"Process finished with exit code {exit_code}, status {exit_status}")
-        # Update progress bar to next step
-        if self.merge_mode:
-             completed = len(self.generated_segments)
-        else:
-             completed = self.total_queue - len(self.queue)
-             
-        progress = int((completed / self.total_queue) * 100)
-        self.progress_bar.setValue(progress)
-        
+    def process_finished(self, exit_code, _status):
+        if exit_code != 0:
+            self.log(f"⚠️  FFmpeg exited {exit_code}")
+        self.done_output_secs += self.current_event_secs
+        self.progress_bar.setValue(
+            int(min(99, self.done_output_secs / max(1e-6, self.total_output_secs) * 100)))
         self.process_next()
 
+    def concat_finished(self, exit_code, _status):
+        self.log(f"Concat finished (exit {exit_code})")
+        if getattr(self, "_concat_list", None) and os.path.exists(self._concat_list):
+            os.remove(self._concat_list)
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
+            self.log("Cleaned up temp segments.")
+        self.finish_processing()
+
     def finish_processing(self):
-        # 자막 PNG 임시 폴더 정리
         try:
             self.processor.cleanup_temp()
         except Exception as e:
-            self.log(f"Failed to cleanup timestamp frames: {e}")
-        self.lbl_status.setText("Processing Complete!")
+            self.log(f"cleanup_temp failed: {e}")
+        self.progress_bar.setValue(100)
+        self.lbl_status.setText("✅ Processing Complete!")
         self.btn_process.setEnabled(True)
         self.btn_select_dir.setEnabled(True)
-        self.progress_bar.setValue(100)
         QMessageBox.information(self, "Done", "Processing complete.")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
