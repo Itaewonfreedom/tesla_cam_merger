@@ -46,6 +46,8 @@ DARK_QSS = """
 QWidget { background:#15171c; color:#e6e8ec; font-size:13px; }
 QMainWindow, QDialog { background:#15171c; }
 #Header { background:#0e0f13; border-bottom:1px solid #2a2d36; }
+#Rocket { font-size:18px; border:none; background:transparent; padding:4px 8px; }
+#Rocket:hover { background:#23262f; border-radius:8px; }
 QGroupBox { border:1px solid #2a2d36; border-radius:10px; margin-top:14px; padding:10px;
             background:#1a1d24; }
 QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; color:#9aa0ad; }
@@ -346,11 +348,17 @@ class MainWindow(QMainWindow):
         head.setObjectName("Header")
         h = QHBoxLayout(head)
         h.setContentsMargins(16, 10, 12, 10)
-        # 폴더 불러오기 버튼을 왼쪽에 배치 (상단 브랜딩/로켓은 제거)
+        # 폴더 불러오기 버튼을 왼쪽에 배치 (상단 브랜딩은 제거)
         self.btn_folder = QPushButton("📁  Select Folder")
         self.btn_folder.clicked.connect(self.select_directory)
         h.addWidget(self.btn_folder)
         h.addStretch()
+        # 오른쪽 로켓 버튼 (이스터에그)
+        rocket = QPushButton("🚀")
+        rocket.setObjectName("Rocket")
+        rocket.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        rocket.clicked.connect(self.show_elon_hype)
+        h.addWidget(rocket)
         return head
 
     def _build_left(self):
