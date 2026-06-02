@@ -11,7 +11,6 @@ import os
 import re
 import sys
 import json
-import random
 import shutil
 import tempfile
 
@@ -42,24 +41,11 @@ LAYOUT_LABELS = {
 DEFAULT_OPTS = dict(encoding="hevc_videotoolbox", quality="bitrate", bitrate="20M",
                     crf=20, fps=30, width=1920, speed=1.0, timestamp=True, labels=True)
 
-DOGE_QUOTES = [
-    "일론… 천재인 건 인정합니다. 화성도 가고 전기차도 다 좋은데… 제발 도지 한 번만 띄워주세요 🐕🚀",
-    "“To the moon”은 됐고요, 제 도지코인부터 달에 보내주세요 일론 형 🙏",
-    "스페이스X 로켓에 제 도지 좀 같이 실어주시면 안 될까요…? 씨발 진짜 도지 좀 사주세요 일론님 😭",
-    "테슬라 짱… 그러니까 도지 결제 다시 열어주시고 한 트윗만… 딱 한 트윗만 부탁드립니다 🐶",
-    "일론 머스크님 당신은 미래입니다. 그 미래에 제 도지 평단가 탈출도 좀 넣어주세요 📈🚀",
-    "Occupy Mars 좋죠. 근데 그 전에 제 지갑부터 좀 occupy 해주세요, 도지로요 🐕💸",
-]
-
 # ----------------------------- 다크 테마 ----------------------------- #
 DARK_QSS = """
 QWidget { background:#15171c; color:#e6e8ec; font-size:13px; }
 QMainWindow, QDialog { background:#15171c; }
 #Header { background:#0e0f13; border-bottom:1px solid #2a2d36; }
-#Title { font-size:18px; font-weight:700; color:#ffffff; }
-#Tagline { color:#7b8190; font-size:11px; }
-#Rocket { font-size:18px; border:none; background:transparent; padding:4px 8px; }
-#Rocket:hover { background:#23262f; border-radius:8px; }
 QGroupBox { border:1px solid #2a2d36; border-radius:10px; margin-top:14px; padding:10px;
             background:#1a1d24; }
 QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; color:#9aa0ad; }
@@ -299,15 +285,7 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def show_elon_hype(self):
-        box = QMessageBox(self)
-        box.setWindowTitle("🐕🚀 DOGE MODE")
-        box.setText(
-            "<h2 style='color:#2b6cff;'>🐕 DOGE MODE ACTIVATED 🚀</h2>"
-            "<p><b>일론 형… 천재인 거 압니다. 근데 제발 도지 한 번만 띄워주세요 🙏</b></p>"
-            f"<p style='color:#9aa0ad;'>{random.choice(DOGE_QUOTES)}</p>"
-            "<p style='color:#9aa0ad;'>— 도지에 물린 당신의 Tesla Dashcam Merger 올림</p>")
-        box.setStandardButtons(QMessageBox.StandardButton.Ok)
-        box.exec()
+        QMessageBox.information(self, " ", "일론 형, 도지 한 번만 띄워주세요 🐕")
 
     # ----------------------------- 설정 ----------------------------- #
     def load_settings(self):
@@ -368,24 +346,11 @@ class MainWindow(QMainWindow):
         head.setObjectName("Header")
         h = QHBoxLayout(head)
         h.setContentsMargins(16, 10, 12, 10)
-        col = QVBoxLayout()
-        title = QLabel("🚗  Tesla Dashcam Merger")
-        title.setObjectName("Title")
-        tag = QLabel("Merge dashcams. 그리고 일론님… 도지 좀 사주세요 🐕")
-        tag.setObjectName("Tagline")
-        col.addWidget(title)
-        col.addWidget(tag)
-        h.addLayout(col)
-        h.addStretch()
+        # 폴더 불러오기 버튼을 왼쪽에 배치 (상단 브랜딩/로켓은 제거)
         self.btn_folder = QPushButton("📁  Select Folder")
         self.btn_folder.clicked.connect(self.select_directory)
         h.addWidget(self.btn_folder)
-        rocket = QPushButton("🚀")
-        rocket.setObjectName("Rocket")
-        rocket.setToolTip("?")
-        rocket.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        rocket.clicked.connect(self.show_elon_hype)
-        h.addWidget(rocket)
+        h.addStretch()
         return head
 
     def _build_left(self):
@@ -805,11 +770,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"cleanup_temp failed: {e}")
         self.progress_bar.setValue(100)
-        self.lbl_status.setText("✅ Export 완료!  🐕 이제 도지만 오르면 됩니다")
+        self.lbl_status.setText("✅ Export 완료!")
         self.btn_process.setEnabled(True)
         self.btn_folder.setEnabled(True)
-        QMessageBox.information(self, "Done",
-                                "Export 완료! 🚀\n일론 형, 보고 계시면 도지 한 번만요 🐕🙏")
+        QMessageBox.information(self, "Done", "Export 완료!")
 
 
 if __name__ == "__main__":
