@@ -42,13 +42,13 @@ LAYOUT_LABELS = {
 DEFAULT_OPTS = dict(encoding="hevc_videotoolbox", quality="bitrate", bitrate="20M",
                     crf=20, fps=30, width=1920, speed=1.0, timestamp=True, labels=True)
 
-ELON_QUOTES = [
-    "“When something is important enough, you do it even if the odds are not in your favor.”",
-    "“The first step is to establish that something is possible; then probability will occur.”",
-    "“I would like to die on Mars. Just not on impact.”",
-    "“Some people don't like change, but you need to embrace change if the alternative is disaster.”",
-    "“Persistence is very important. You should not give up unless you are forced to give up.”",
-    "“If you get up in the morning and think the future is going to be better, it is a bright day.”",
+DOGE_QUOTES = [
+    "일론… 천재인 건 인정합니다. 화성도 가고 전기차도 다 좋은데… 제발 도지 한 번만 띄워주세요 🐕🚀",
+    "“To the moon”은 됐고요, 제 도지코인부터 달에 보내주세요 일론 형 🙏",
+    "스페이스X 로켓에 제 도지 좀 같이 실어주시면 안 될까요…? 씨발 진짜 도지 좀 사주세요 일론님 😭",
+    "테슬라 짱… 그러니까 도지 결제 다시 열어주시고 한 트윗만… 딱 한 트윗만 부탁드립니다 🐶",
+    "일론 머스크님 당신은 미래입니다. 그 미래에 제 도지 평단가 탈출도 좀 넣어주세요 📈🚀",
+    "Occupy Mars 좋죠. 근데 그 전에 제 지갑부터 좀 occupy 해주세요, 도지로요 🐕💸",
 ]
 
 # ----------------------------- 다크 테마 ----------------------------- #
@@ -260,6 +260,12 @@ class MainWindow(QMainWindow):
         self._pending_pos = 0
         self._want_play = False
         self._was_playing = False
+        # 재생 의도. 이 백엔드는 setPosition(seek) 시 재생을 멈추므로, 의도가 살아있으면
+        # playbackStateChanged에서 재생을 다시 걸어 "스크럽 후 자동 재생"을 보장한다.
+        self._play_intent = False
+        # 새 소스 로드 중인지 표시. seek는 mediaStatus를 다시 Buffered로 만드는데,
+        # 그때 첫 프레임용 play();pause()가 돌면 스크럽 재생이 멈춘다. 이 플래그로 막는다.
+        self._loading_source = False
         self._egg_buf = ""
 
         self.settings_file = os.path.join(
@@ -287,18 +293,19 @@ class MainWindow(QMainWindow):
             text = event.text().upper()
             if text.isalpha():
                 self._egg_buf = (self._egg_buf + text)[-8:]
-                if self._egg_buf.endswith("ELON") or self._egg_buf.endswith("MARS"):
+                if any(self._egg_buf.endswith(k) for k in ("ELON", "MARS", "DOGE")):
                     self._egg_buf = ""
                     self.show_elon_hype()
         return super().eventFilter(obj, event)
 
     def show_elon_hype(self):
         box = QMessageBox(self)
-        box.setWindowTitle("🚀 To Mars and Beyond")
-        box.setText("<h2 style='color:#2b6cff;'>🚀 ELON MODE ACTIVATED 🚀</h2>"
-                    "<p><b>Occupy Mars. Merge dashcams. Make the future multiplanetary.</b></p>"
-                    f"<p style='color:#9aa0ad;'>{random.choice(ELON_QUOTES)}</p>"
-                    "<p style='color:#9aa0ad;'>— hyped by your friendly Tesla Dashcam Merger</p>")
+        box.setWindowTitle("🐕🚀 DOGE MODE")
+        box.setText(
+            "<h2 style='color:#2b6cff;'>🐕 DOGE MODE ACTIVATED 🚀</h2>"
+            "<p><b>일론 형… 천재인 거 압니다. 근데 제발 도지 한 번만 띄워주세요 🙏</b></p>"
+            f"<p style='color:#9aa0ad;'>{random.choice(DOGE_QUOTES)}</p>"
+            "<p style='color:#9aa0ad;'>— 도지에 물린 당신의 Tesla Dashcam Merger 올림</p>")
         box.setStandardButtons(QMessageBox.StandardButton.Ok)
         box.exec()
 
@@ -364,7 +371,7 @@ class MainWindow(QMainWindow):
         col = QVBoxLayout()
         title = QLabel("🚗  Tesla Dashcam Merger")
         title.setObjectName("Title")
-        tag = QLabel("Occupy Mars. Merge dashcams.")
+        tag = QLabel("Merge dashcams. 그리고 일론님… 도지 좀 사주세요 🐕")
         tag.setObjectName("Tagline")
         col.addWidget(title)
         col.addWidget(tag)
@@ -556,31 +563,54 @@ class MainWindow(QMainWindow):
         cams = self.events.get(self.preview_event, {})
         if not cam or cam not in cams:
             return
-        self._want_play = (not reset) and \
-            (self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
+        self._want_play = (not reset) and self._play_intent
         self._pending_pos = 0 if reset else self.player.position()
         self._set_preview_enabled(True)
+        self._loading_source = True
         self.player.setSource(QUrl.fromLocalFile(os.path.abspath(cams[cam])))
 
     def on_media_status(self, status):
         loaded = (QMediaPlayer.MediaStatus.LoadedMedia,
                   QMediaPlayer.MediaStatus.BufferedMedia)
-        if status in loaded:
+        # seek도 mediaStatus를 loaded로 되돌리므로, 로드 처리는 '새 소스 로드 시'에만 한다.
+        if status in loaded and self._loading_source:
+            self._loading_source = False
             if self._pending_pos:
                 self.player.setPosition(self._pending_pos)
                 self._pending_pos = 0
             if self._want_play:
-                self.player.play()
+                self._play_intent = True
+                QTimer.singleShot(160, self._resume_if_intended)
+                QTimer.singleShot(450, self._resume_if_intended)
             else:
+                # 일시정지 상태로 첫 프레임만 보여준다
+                self._play_intent = False
                 self.player.play()
                 self.player.pause()
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._play_intent = False
+
+    def _resume_if_intended(self):
+        """재생 의도가 살아있고 드래그 중이 아니며 끝이 아니면 play()를 '한 번' 건다.
+        이 백엔드는 seek가 비동기로 일시정지를 유발하므로, seek가 안착한 뒤(딜레이 후)
+        호출해야 재생이 유지된다. 빠른 반복 호출은 진행 중 seek와 race가 나므로 피한다."""
+        if not self._play_intent or self._user_seeking:
+            return
+        dur = self.player.duration()
+        if dur and self.player.position() >= dur:
+            return
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.player.play()
 
     def toggle_play(self):
         if not self.btn_play.isEnabled():
             return
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        # 상태(seek로 요동침)가 아니라 "재생 의도"를 기준으로 토글한다.
+        if self._play_intent:
+            self._play_intent = False
             self.player.pause()
         else:
+            self._play_intent = True
             self.player.play()
 
     def on_playback_state(self, state):
@@ -598,23 +628,25 @@ class MainWindow(QMainWindow):
         self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
 
     def on_slider_pressed(self):
+        # 드래그 시작. "재생 의도"를 기억한다(상태는 seek로 요동치므로 의도로 판단).
         self._user_seeking = True
-        self._was_playing = (
-            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
-        if self._was_playing:
-            self.player.pause()
+        self._was_playing = self._play_intent
 
     def on_slider_moved(self, pos):
-        # 드래그하는 동안 해당 프레임을 실시간 미리보기
+        # 드래그하는 동안 해당 프레임을 실시간 미리보기 (seek는 일시정지를 유발하지만
+        # _user_seeking 동안에는 재시도하지 않아 프레임만 갱신된다)
         self.player.setPosition(pos)
         self.lbl_time.setText(f"{_fmt_time(pos)} / {_fmt_time(self.player.duration())}")
 
     def on_slider_released(self):
         self._user_seeking = False
         self.player.setPosition(self.slider.value())
-        # 재생 중에 긁었으면, seek가 반영된 다음 이벤트 루프에서 바로 재생 재개
+        # 스크럽 전 재생 중이었으면, seek의 비동기 일시정지가 안착한 뒤 재생을 다시 건다.
+        # 단발 + 안전망 1회 (rapid 반복은 진행 중 seek와 race가 나므로 사용하지 않음).
         if self._was_playing:
-            QTimer.singleShot(0, self.player.play)
+            self._play_intent = True
+            QTimer.singleShot(160, self._resume_if_intended)
+            QTimer.singleShot(450, self._resume_if_intended)
         self._was_playing = False
 
     # --------------------------- 설정 수집 --------------------------- #
@@ -773,11 +805,11 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"cleanup_temp failed: {e}")
         self.progress_bar.setValue(100)
-        self.lbl_status.setText("✅ Export complete!  🚀 To Mars!")
+        self.lbl_status.setText("✅ Export 완료!  🐕 이제 도지만 오르면 됩니다")
         self.btn_process.setEnabled(True)
         self.btn_folder.setEnabled(True)
         QMessageBox.information(self, "Done",
-                                "Export complete. 🚀\nElon would be proud.")
+                                "Export 완료! 🚀\n일론 형, 보고 계시면 도지 한 번만요 🐕🙏")
 
 
 if __name__ == "__main__":
